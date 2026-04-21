@@ -344,6 +344,31 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 
+/* ── BOTÓN FLIP CÁMARA ── */
+#btnFlipCam{
+  position:absolute;top:12px;right:12px;
+  width:38px;height:38px;border-radius:50%;
+  background:#000a;backdrop-filter:blur(10px);
+  border:1px solid var(--border);
+  color:var(--text);font-size:1.1rem;
+  cursor:pointer;z-index:10;
+  display:flex;align-items:center;justify-content:center;
+  transition:all .2s;-webkit-user-select:none;user-select:none;
+}
+#btnFlipCam:active{background:var(--surface2);transform:scale(.9)}
+#btnFlipCam.flipping{animation:spin-once .35s ease}
+@keyframes spin-once{0%{transform:rotate(0deg)}100%{transform:rotate(180deg)}}
+
+/* ── INDICADOR DE CÁMARA ACTIVA ── */
+#camIndicator{
+  position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+  background:#000a;backdrop-filter:blur(6px);
+  border:1px solid var(--border);border-radius:20px;
+  padding:4px 10px;font-size:0.6rem;color:var(--text-muted);
+  pointer-events:none;z-index:10;letter-spacing:.06em;
+  transition:opacity .3s;
+}
+
 /* ── FILE INPUT HIDDEN ── */
 #fileInput{display:none}
 </style>
@@ -415,6 +440,12 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
           <span id="handStatusText">Buscando mano...</span>
         </div>
       </div>
+
+      <!-- Botón flip cámara -->
+      <button id="btnFlipCam" onclick="flipCamera()" title="Cambiar cámara">⟳</button>
+
+      <!-- Indicador cámara activa -->
+      <div id="camIndicator">📷 FRONTAL</div>
 
       <!-- Barra de estabilidad -->
       <div id="stabilityWrap"><div id="stabilityBar"></div></div>
@@ -557,13 +588,13 @@ Object.values(dict).forEach(normalizeDictEntry);
 // ═══════════════════════════════════════════════════════
 
 function normalizeLandmarks(lm) {
-  // lm: array de {x,y,z} — 21 puntos
-  // Espejamos X (1 - x) para que todo el pipeline use las mismas coordenadas
-  // que ve el usuario (video con scaleX(-1) en CSS).
-  // Esto asegura que lo que se graba y lo que se detecta en vivo sean iguales.
+  // Espejamos X solo en cámara frontal (selfie), igual que el video.
+  // Cámara trasera: usamos x tal cual.
+  // Esto garantiza que grabación y reconocimiento en vivo sean siempre consistentes.
+  const mirror = isMirrored();
   const pts = new Float32Array(42);
   for (let i = 0; i < 21; i++) {
-    pts[i*2]   = 1.0 - lm[i].x;  // <-- espejo horizontal
+    pts[i*2]   = mirror ? 1.0 - lm[i].x : lm[i].x;
     pts[i*2+1] = lm[i].y;
   }
   // Centrar en muñeca
@@ -755,43 +786,42 @@ function onResults(results) {
   const lmNorm = normalizeLandmarks(lmRaw); // espejo X incluido
 
   // ── Dibujar esqueleto de mano manualmente en píxeles ──
-  // MediaPipe entrega x,y normalizados (0-1).
-  // El video tiene scaleX(-1) en CSS → espejamos x = 1 - lm.x
-  // Luego multiplicamos por W y H del canvas para obtener píxeles exactos.
+  // Cámara frontal (user): espejamos x = 1 - lm.x  (selfie)
+  // Cámara trasera (environment): usamos x tal cual  (no espejo)
   const isRec = appMode === 'record' && isRecording;
   const lineCol = isRec ? '#f85149bb' : '#2ea04355';
   const dotCol  = isRec ? '#f85149'   : '#2ea043';
+  const mirror  = isMirrored();
 
   // Conexiones del esqueleto de mano (índices de MediaPipe Hands)
   const CONNECTIONS = [
-    [0,1],[1,2],[2,3],[3,4],         // pulgar
-    [0,5],[5,6],[6,7],[7,8],         // índice
-    [0,9],[9,10],[10,11],[11,12],    // medio
-    [0,13],[13,14],[14,15],[15,16],  // anular
-    [0,17],[17,18],[18,19],[19,20],  // meñique
-    [5,9],[9,13],[13,17]             // palma
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [0,9],[9,10],[10,11],[11,12],
+    [0,13],[13,14],[14,15],[15,16],
+    [0,17],[17,18],[18,19],[19,20],
+    [5,9],[9,13],[13,17]
   ];
+
+  const lx = i => (mirror ? 1 - lmRaw[i].x : lmRaw[i].x) * W;
+  const ly = i => lmRaw[i].y * H;
 
   // Dibujar líneas
   ovCtx.strokeStyle = lineCol;
   ovCtx.lineWidth   = 2;
   ovCtx.lineCap     = 'round';
   for (const [a, b] of CONNECTIONS) {
-    const ax = (1 - lmRaw[a].x) * W,  ay = lmRaw[a].y * H;
-    const bx = (1 - lmRaw[b].x) * W,  by = lmRaw[b].y * H;
     ovCtx.beginPath();
-    ovCtx.moveTo(ax, ay);
-    ovCtx.lineTo(bx, by);
+    ovCtx.moveTo(lx(a), ly(a));
+    ovCtx.lineTo(lx(b), ly(b));
     ovCtx.stroke();
   }
 
   // Dibujar puntos
   for (let i = 0; i < lmRaw.length; i++) {
-    const px = (1 - lmRaw[i].x) * W;
-    const py = lmRaw[i].y * H;
-    const r  = i === 0 ? 6 : 4; // muñeca más grande
+    const r = i === 0 ? 6 : 4;
     ovCtx.beginPath();
-    ovCtx.arc(px, py, r, 0, Math.PI * 2);
+    ovCtx.arc(lx(i), ly(i), r, 0, Math.PI * 2);
     ovCtx.fillStyle = dotCol;
     ovCtx.fill();
     ovCtx.strokeStyle = '#000a';
@@ -1258,20 +1288,87 @@ function showToast(msg) {
 }
 
 // ═══════════════════════════════════════════════════════
+//  CÁMARA — con soporte frontal / trasera
+// ═══════════════════════════════════════════════════════
+let currentFacing = 'user';   // 'user' = frontal, 'environment' = trasera
+let currentStream = null;
+
+// La cámara frontal se espeja (selfie), la trasera NO.
+// Esto afecta tanto el CSS del video como el espejo de los landmarks al dibujar.
+function isMirrored() { return currentFacing === 'user'; }
+
+async function startCamera(facing) {
+  // Detener stream anterior si existe
+  if (currentStream) {
+    currentStream.getTracks().forEach(t => t.stop());
+    currentStream = null;
+  }
+
+  const constraints = {
+    video: {
+      facingMode: { ideal: facing },
+      width:  { ideal: 640 },
+      height: { ideal: 480 }
+    }
+  };
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    currentStream  = stream;
+    currentFacing  = facing;
+    videoEl.srcObject = stream;
+    await videoEl.play();
+
+    // Espejo CSS: solo en cámara frontal
+    videoEl.style.transform = isMirrored() ? 'scaleX(-1)' : 'scaleX(1)';
+
+    // Actualizar indicador
+    const indicator = document.getElementById('camIndicator');
+    indicator.textContent = facing === 'user' ? '📷 FRONTAL' : '📷 TRASERA';
+
+    return true;
+  } catch(e) {
+    console.error('Camera error:', e);
+    return false;
+  }
+}
+
+async function flipCamera() {
+  const btn = document.getElementById('btnFlipCam');
+  btn.classList.add('flipping');
+  setTimeout(() => btn.classList.remove('flipping'), 350);
+
+  // Detener grabación si está activa
+  if (isRecording) { isRecording = false; resetRecUI(); }
+
+  // Limpiar estado de detección
+  handPresent = false;
+  liveFrames  = [];
+  updateHandStatus(false);
+  updateDetectedBadge(null, 0, false);
+
+  const nextFacing = currentFacing === 'user' ? 'environment' : 'user';
+  const ok = await startCamera(nextFacing);
+
+  if (!ok) {
+    showToast('⚠ No se encontró cámara ' + (nextFacing === 'user' ? 'frontal' : 'trasera'));
+    // Volver a la anterior
+    await startCamera(currentFacing);
+  } else {
+    showToast(nextFacing === 'user' ? '📷 Cámara frontal' : '📷 Cámara trasera');
+  }
+}
+
+// ═══════════════════════════════════════════════════════
 //  INICIO
 // ═══════════════════════════════════════════════════════
 async function startApp() {
   document.getElementById('onboarding').style.display = 'none';
   document.getElementById('app').style.display        = 'flex';
 
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width:{ideal:640}, height:{ideal:480} }
-    });
-    videoEl.srcObject = stream;
-    await videoEl.play();
-  } catch(e) {
-    alert('No se pudo acceder a la cámara: ' + e.message);
+  const ok = await startCamera('user');
+  if (!ok) {
+    alert('No se pudo acceder a la cámara. Verificá los permisos del dispositivo.');
     return;
   }
 

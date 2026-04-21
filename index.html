@@ -558,9 +558,12 @@ Object.values(dict).forEach(normalizeDictEntry);
 
 function normalizeLandmarks(lm) {
   // lm: array de {x,y,z} — 21 puntos
+  // Espejamos X (1 - x) para que todo el pipeline use las mismas coordenadas
+  // que ve el usuario (video con scaleX(-1) en CSS).
+  // Esto asegura que lo que se graba y lo que se detecta en vivo sean iguales.
   const pts = new Float32Array(42);
   for (let i = 0; i < 21; i++) {
-    pts[i*2]   = lm[i].x;
+    pts[i*2]   = 1.0 - lm[i].x;  // <-- espejo horizontal
     pts[i*2+1] = lm[i].y;
   }
   // Centrar en muñeca
@@ -725,7 +728,6 @@ window.addEventListener('resize', resizeOverlay);
 function onResults(results) {
   const W = overlayCanvas.width, H = overlayCanvas.height;
   ovCtx.clearRect(0,0,W,H);
-
   if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
     handPresent = false;
     stableCount = 0;
@@ -740,18 +742,21 @@ function onResults(results) {
   handPresent = true;
   updateHandStatus(true);
 
-  const lmRaw = results.multiHandLandmarks[0];
-  const lmNorm = normalizeLandmarks(lmRaw);
+  const lmRaw  = results.multiHandLandmarks[0];
+  const lmNorm = normalizeLandmarks(lmRaw);  // ya incluye espejo X
 
-  // Dibujar landmarks espejados
-  const W_vid = W, H_vid = H;
+  // ── Dibujar landmarks sobre el canvas, espejando manualmente ──
+  // El video CSS tiene scaleX(-1), pero el canvas overlay NO.
+  // Entonces dibujamos transformando x → (1-x)*W para que coincida visualmente.
+  const W = overlayCanvas.width, H = overlayCanvas.height;
   ovCtx.save();
-  // Landmarks ya vienen espejados porque el video está con scaleX(-1)
+  // Crear versión espejada de los landmarks para el dibujo
+  const lmMirrored = lmRaw.map(p => ({ x: 1 - p.x, y: p.y, z: p.z }));
   if (window.drawConnectors && window.HAND_CONNECTIONS) {
-    drawConnectors(ovCtx, lmRaw, HAND_CONNECTIONS,
-      { color: appMode === 'record' && isRecording ? '#f85149' : '#2ea04388', lineWidth: 2 });
-    drawLandmarks(ovCtx, lmRaw,
-      { color: appMode === 'record' && isRecording ? '#f85149' : '#2ea043', lineWidth: 1, radius: 3 });
+    drawConnectors(ovCtx, lmMirrored, HAND_CONNECTIONS,
+      { color: appMode === 'record' && isRecording ? '#f85149aa' : '#2ea04366', lineWidth: 2 });
+    drawLandmarks(ovCtx, lmMirrored,
+      { color: appMode === 'record' && isRecording ? '#f85149' : '#2ea043', lineWidth: 1, radius: 4 });
   }
   ovCtx.restore();
 
@@ -761,9 +766,9 @@ function onResults(results) {
 
   // ── MODO GRABACIÓN ──
   if (appMode === 'record' && isRecording) {
-    if (recType === 'static') {
-      recStaticLm = lmNorm;
-    } else {
+    if (recType === 'dynamic') {
+      // Estáticas: capturadas via liveFrames en el setInterval de startRecording
+      // Dinámicas: acumular frames aquí
       recFrames.push(lmNorm);
       const pct = Math.min(100, (recFrames.length / recMaxFrames) * 100);
       document.getElementById('recProgressFill').style.width = pct + '%';
@@ -771,7 +776,8 @@ function onResults(results) {
         `Grabando... ${recFrames.length}/${recMaxFrames} frames`;
       if (recFrames.length >= recMaxFrames) finishRecording();
     }
-    return;
+    // Para estáticas no hacemos return: dejamos que liveFrames siga acumulando
+    if (recType === 'static') return;
   }
 
   // ── MODO TRADUCCIÓN ──
@@ -871,15 +877,24 @@ function startRecording() {
   document.getElementById('recIcon').textContent = recType === 'dynamic' ? '⏹' : '✓';
 
   if (recType === 'static') {
-    // Para estáticas: capturar durante 1.5s y promediar
-    let frames = [];
+    // Para estáticas: muestrear liveFrames durante 1.5s y promediar
+    // liveFrames se actualiza en CADA frame de onResults sin importar el modo
+    const capturedFrames = [];
     const interval = setInterval(() => {
-      if (recStaticLm) frames.push(new Float32Array(recStaticLm));
+      if (liveFrames.length > 0) {
+        // Tomar el frame más reciente
+        capturedFrames.push(new Float32Array(liveFrames[liveFrames.length - 1]));
+      }
     }, 50);
     recTimer = setTimeout(() => {
       clearInterval(interval);
-      if (frames.length > 0) finishStaticRecording(frames);
-      else { isRecording = false; showToast('⚠ No se detectó mano'); resetRecUI(); }
+      if (capturedFrames.length > 0) {
+        finishStaticRecording(capturedFrames);
+      } else {
+        isRecording = false;
+        showToast('⚠ No se detectó mano durante la grabación');
+        resetRecUI();
+      }
     }, 1500);
   }
 }

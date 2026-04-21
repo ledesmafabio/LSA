@@ -726,8 +726,17 @@ function resizeOverlay() {
 window.addEventListener('resize', resizeOverlay);
 
 function onResults(results) {
-  const W = overlayCanvas.width, H = overlayCanvas.height;
-  ovCtx.clearRect(0,0,W,H);
+  // Sincronizar tamaño del canvas con el elemento visible en cada frame
+  const cRect = overlayCanvas.getBoundingClientRect();
+  if (overlayCanvas.width  !== Math.round(cRect.width) ||
+      overlayCanvas.height !== Math.round(cRect.height)) {
+    overlayCanvas.width  = Math.round(cRect.width);
+    overlayCanvas.height = Math.round(cRect.height);
+  }
+  const W = overlayCanvas.width;
+  const H = overlayCanvas.height;
+  ovCtx.clearRect(0, 0, W, H);
+
   if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
     handPresent = false;
     stableCount = 0;
@@ -743,22 +752,52 @@ function onResults(results) {
   updateHandStatus(true);
 
   const lmRaw  = results.multiHandLandmarks[0];
-  const lmNorm = normalizeLandmarks(lmRaw);  // ya incluye espejo X
+  const lmNorm = normalizeLandmarks(lmRaw); // espejo X incluido
 
-  // ── Dibujar landmarks sobre el canvas, espejando manualmente ──
-  // El video CSS tiene scaleX(-1), pero el canvas overlay NO.
-  // Entonces dibujamos transformando x → (1-x)*W para que coincida visualmente.
-  const W = overlayCanvas.width, H = overlayCanvas.height;
-  ovCtx.save();
-  // Crear versión espejada de los landmarks para el dibujo
-  const lmMirrored = lmRaw.map(p => ({ x: 1 - p.x, y: p.y, z: p.z }));
-  if (window.drawConnectors && window.HAND_CONNECTIONS) {
-    drawConnectors(ovCtx, lmMirrored, HAND_CONNECTIONS,
-      { color: appMode === 'record' && isRecording ? '#f85149aa' : '#2ea04366', lineWidth: 2 });
-    drawLandmarks(ovCtx, lmMirrored,
-      { color: appMode === 'record' && isRecording ? '#f85149' : '#2ea043', lineWidth: 1, radius: 4 });
+  // ── Dibujar esqueleto de mano manualmente en píxeles ──
+  // MediaPipe entrega x,y normalizados (0-1).
+  // El video tiene scaleX(-1) en CSS → espejamos x = 1 - lm.x
+  // Luego multiplicamos por W y H del canvas para obtener píxeles exactos.
+  const isRec = appMode === 'record' && isRecording;
+  const lineCol = isRec ? '#f85149bb' : '#2ea04355';
+  const dotCol  = isRec ? '#f85149'   : '#2ea043';
+
+  // Conexiones del esqueleto de mano (índices de MediaPipe Hands)
+  const CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],         // pulgar
+    [0,5],[5,6],[6,7],[7,8],         // índice
+    [0,9],[9,10],[10,11],[11,12],    // medio
+    [0,13],[13,14],[14,15],[15,16],  // anular
+    [0,17],[17,18],[18,19],[19,20],  // meñique
+    [5,9],[9,13],[13,17]             // palma
+  ];
+
+  // Dibujar líneas
+  ovCtx.strokeStyle = lineCol;
+  ovCtx.lineWidth   = 2;
+  ovCtx.lineCap     = 'round';
+  for (const [a, b] of CONNECTIONS) {
+    const ax = (1 - lmRaw[a].x) * W,  ay = lmRaw[a].y * H;
+    const bx = (1 - lmRaw[b].x) * W,  by = lmRaw[b].y * H;
+    ovCtx.beginPath();
+    ovCtx.moveTo(ax, ay);
+    ovCtx.lineTo(bx, by);
+    ovCtx.stroke();
   }
-  ovCtx.restore();
+
+  // Dibujar puntos
+  for (let i = 0; i < lmRaw.length; i++) {
+    const px = (1 - lmRaw[i].x) * W;
+    const py = lmRaw[i].y * H;
+    const r  = i === 0 ? 6 : 4; // muñeca más grande
+    ovCtx.beginPath();
+    ovCtx.arc(px, py, r, 0, Math.PI * 2);
+    ovCtx.fillStyle = dotCol;
+    ovCtx.fill();
+    ovCtx.strokeStyle = '#000a';
+    ovCtx.lineWidth = 1;
+    ovCtx.stroke();
+  }
 
   // Acumular frame en ventana deslizante
   liveFrames.push(lmNorm);
@@ -857,41 +896,45 @@ function toggleRecord() {
 function startRecording() {
   const name = document.getElementById('recNameInput').value.trim().toUpperCase();
   if (!name) { showToast('⚠ Ingresá un nombre para la seña'); return; }
-  if (!handPresent) { showToast('⚠ Primero mostrá tu mano a la cámara'); return; }
 
   isRecording  = true;
   recFrames    = [];
-  recStaticLm  = null;
 
   // UI
   document.getElementById('btnStartRecord').classList.add('recording');
-  document.getElementById('recBtnIcon').textContent   = recType === 'dynamic' ? '⏹' : '✓';
-  document.getElementById('recBtnLabel').textContent  = recType === 'dynamic' ? 'Detener grabación' : 'Guardar seña';
-  document.getElementById('recStatus').textContent    = recType === 'dynamic'
-    ? 'Realizá la seña ahora...' : 'Mantené la posición de la seña...';
+  document.getElementById('recBtnIcon').textContent  = recType === 'dynamic' ? '⏹' : '✓';
+  document.getElementById('recBtnLabel').textContent = recType === 'dynamic' ? 'Detener grabación' : 'Guardar seña';
+  document.getElementById('recStatus').textContent   = recType === 'dynamic'
+    ? 'Realizá la seña con movimiento...' : 'Mantené la posición 1.5 segundos...';
   document.getElementById('recProgressFill').style.width = '0%';
   document.getElementById('detectedBadge').classList.add('recording-active');
-
-  // Botón flotante
   document.getElementById('btnRecordFloat').classList.add('recording');
   document.getElementById('recIcon').textContent = recType === 'dynamic' ? '⏹' : '✓';
 
   if (recType === 'static') {
-    // Para estáticas: muestrear liveFrames durante 1.5s y promediar
-    // liveFrames se actualiza en CADA frame de onResults sin importar el modo
+    // Capturar frames de liveFrames durante 1.5s y promediar
     const capturedFrames = [];
+    let elapsed = 0;
     const interval = setInterval(() => {
+      elapsed += 80;
+      // liveFrames siempre tiene el frame más reciente aunque no haya mano
       if (liveFrames.length > 0) {
-        // Tomar el frame más reciente
         capturedFrames.push(new Float32Array(liveFrames[liveFrames.length - 1]));
       }
-    }, 50);
+      const pct = Math.min(100, (elapsed / 1500) * 100);
+      document.getElementById('recProgressFill').style.width = pct + '%';
+      document.getElementById('recStatus').textContent =
+        liveFrames.length > 0
+          ? `Capturando... ${capturedFrames.length} muestras`
+          : '⚠ Mostrá tu mano a la cámara...';
+    }, 80);
+
     recTimer = setTimeout(() => {
       clearInterval(interval);
-      if (capturedFrames.length > 0) {
+      isRecording = false;
+      if (capturedFrames.length >= 3) {
         finishStaticRecording(capturedFrames);
       } else {
-        isRecording = false;
         showToast('⚠ No se detectó mano durante la grabación');
         resetRecUI();
       }
